@@ -16,8 +16,7 @@ use std::{
 };
 
 const HASH_K: u64 = 0xf1357aea2e62a9c5;
-const HASH_SEED1: u64 = 0x243f6a8885a308d3;
-const HASH_SEED2: u64 = 0x13198a2e03707344;
+const HASH_SEED: u64 = 0x13198a2e03707344;
 
 struct FastHasherBuilder;
 struct FastHasher(u64);
@@ -39,37 +38,21 @@ impl Hasher for FastHasher {
 
     fn write(&mut self, bytes: &[u8]) {
         let len = bytes.len();
-        let mut s0 = HASH_SEED1;
-        let mut s1 = HASH_SEED2;
+        let mut acc = HASH_SEED;
 
-        if len <= 16 {
-            if len >= 8 {
-                // bound checks are optimized away by the compiler
-                // so better keep them
-                s0 ^= u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                s1 ^= u64::from_le_bytes(bytes[len - 8..].try_into().unwrap());
-            } else if len >= 4 {
-                s0 ^= u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as u64;
-                s1 ^= u32::from_le_bytes(bytes[len - 4..].try_into().unwrap()) as u64;
-            } else if len > 0 {
+        match len {
+            0..4 => {
                 let lo = bytes[0];
                 let mid = bytes[len / 2];
                 let hi = bytes[len - 1];
-                s0 ^= lo as u64;
-                s1 ^= ((hi as u64) << 8) | mid as u64;
+                acc ^= (lo as u64) | ((mid as u64) << 8) | ((hi as u64) << 16);
             }
-        } else {
-            // only hash the first 16 bytes
-            s0 ^= u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-            s1 ^= u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+            4.. => {
+                acc ^= u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as u64;
+            }
         }
 
-        let full = (s0 as u128).wrapping_mul(s1 as u128);
-        let lo = full as u64;
-        let hi = (full >> 64) as u64;
-        let mix = lo ^ hi;
-
-        self.0 = self.0.wrapping_add(mix).wrapping_mul(HASH_K);
+        self.0 = self.0.wrapping_add(acc).wrapping_mul(HASH_K);
     }
 }
 
