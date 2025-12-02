@@ -230,8 +230,8 @@ fn print(stats: BTreeMap<String, Stat>) {
 #[inline(never)]
 fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
     let mut stats: [HashMap<StrVec, Stat, FastHasherBuilder>; 2] = [
-        HashMap::with_capacity_and_hasher(1024 / 2, FastHasherBuilder),
-        HashMap::with_capacity_and_hasher(1024 / 2, FastHasherBuilder),
+        HashMap::with_capacity_and_hasher(1024, FastHasherBuilder),
+        HashMap::with_capacity_and_hasher(1024, FastHasherBuilder),
     ];
 
     let mut at = 0;
@@ -243,8 +243,8 @@ fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
         let station = unsafe { line.get_unchecked(..semi) };
         let temperature = unsafe { line.get_unchecked(semi + 1..) };
         let t = parse_temperature(temperature);
-        let bucket = unsafe { stats.get_unchecked_mut(station.len() & 1) };
 
+        let bucket = unsafe { stats.get_unchecked_mut(station.len() & 1) };
         update_stats(bucket, station, t);
     }
 
