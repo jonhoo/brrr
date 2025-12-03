@@ -143,10 +143,10 @@ struct Stat {
 impl Default for Stat {
     fn default() -> Self {
         Self {
-            min: i16::MAX,
+            min: i16::MIN,
             sum: 0,
             count: 0,
-            max: i16::MIN,
+            max: i16::MAX,
         }
     }
 }
