@@ -7,11 +7,11 @@
 use std::io::Write;
 use std::{
     borrow::Borrow,
-    collections::{BTreeMap, HashMap, btree_map::Entry},
+    collections::{btree_map::Entry, BTreeMap, HashMap},
     fs::File,
     hash::{BuildHasher, Hash, Hasher},
     mem::ManuallyDrop,
-    simd::{Simd, cmp::SimdPartialEq},
+    simd::{cmp::SimdPartialEq, Simd},
 };
 
 #[cfg(unix)]
@@ -257,16 +257,15 @@ fn print(stats: BTreeMap<String, Stat>) {
 }
 
 #[inline(never)]
-fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
+fn one(mut map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
     let mut stats = HashMap::with_capacity_and_hasher(1_024, FastHasherBuilder);
-    let mut at = 0;
-    while at < map.len() {
-        let newline_at = at + unsafe { find_newline(&map[at..]).unwrap_unchecked() };
-        let line = unsafe { map.get_unchecked(at..newline_at) };
-        at = newline_at + 1;
-        let (station, temperature) = unsafe { split_at_semicolon(line) };
-        let t = parse_temperature(temperature);
-        update_stats(&mut stats, station, t);
+    while !map.is_empty() {
+        let semi_at = next_semi(map).unwrap();
+        let station = unsafe { map.get_unchecked(..semi_at) };
+        map = unsafe { map.get_unchecked(semi_at + 1..) };
+        let (temperature, bytes_parsed) = parse_temperature(map);
+        update_stats(&mut stats, station, temperature);
+        map = unsafe { map.get_unchecked(bytes_parsed + 1..) };
     }
     stats
 }
@@ -284,19 +283,6 @@ fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &
     }
     stats.sum += i64::from(t);
     stats.count += 1;
-}
-
-// SAFETY: buffer must contain a semicolon in the last min(8, buffer.len()) bytes
-unsafe fn split_at_semicolon(buffer: &[u8]) -> (&[u8], &[u8]) {
-    let mut pos = buffer.len() - 4;
-    unsafe {
-        // SAFETY: readme promises there will be a semicolon
-        while *buffer.get_unchecked(pos) != b';' {
-            pos -= 1;
-        }
-        let (before, after) = buffer.split_at_unchecked(pos + 1);
-        (&before[..before.len() - 1], after)
-    }
 }
 
 pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
@@ -318,28 +304,45 @@ pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
     bytes.simd_eq(SPLAT).first_set().map(|set| set + i)
 }
 
+pub fn next_semi(mut buffer: &[u8]) -> Option<usize> {
+    const LANES: usize = 32;
+    const SPLAT: Simd<u8, LANES> = Simd::splat(b';');
+
+    let mut i = 0;
+    while let Some((chunk, rest)) = buffer.split_first_chunk() {
+        let bytes = Simd::<u8, LANES>::from_array(*chunk);
+        let index = bytes.simd_eq(SPLAT).first_set().map(|set| set + i);
+        if index.is_some() {
+            return index;
+        }
+        i += LANES;
+        buffer = rest;
+    }
+
+    let bytes = Simd::<u8, LANES>::load_or_default(buffer);
+    bytes.simd_eq(SPLAT).first_set().map(|set| set + i)
+}
+
 #[inline]
-fn parse_temperature(t: &[u8]) -> i16 {
-    let tlen = t.len();
-    unsafe { std::hint::assert_unchecked(tlen >= 3) };
-    let is_neg = std::hint::select_unpredictable(t[0] == b'-', true, false);
-    let sign = i16::from(!is_neg) * 2 - 1;
-    let skip = usize::from(is_neg);
-    let has_dd = std::hint::select_unpredictable(tlen - skip == 4, true, false);
-    let mul = i16::from(has_dd) * 90 + 10;
-    let t1 = mul * i16::from(t[skip] - b'0');
-    let t2 = i16::from(has_dd) * 10 * i16::from(t[tlen - 3] - b'0');
-    let t3 = i16::from(t[tlen - 1] - b'0');
-    sign * (t1 + t2 + t3)
+fn parse_temperature(t: &[u8]) -> (i16, usize) {
+    let has_sign = (t[0] == b'-') as usize;
+    let has_tens = (t[has_sign + 2] == b'.') as usize;
+    let abs = (t[has_sign + has_tens + 2] - b'0') as i16
+        + (t[has_sign + has_tens] - b'0') as i16 * 10
+        + has_tens as i16 * 100 * (t[has_sign] - b'0') as i16;
+    (
+        ((2 - has_sign as i16 * 2) - 1) * abs,
+        3 + has_sign + has_tens as usize,
+    )
 }
 
 #[test]
 fn pt() {
-    assert_eq!(parse_temperature(b"0.0"), 0);
-    assert_eq!(parse_temperature(b"9.2"), 92);
-    assert_eq!(parse_temperature(b"-9.2"), -92);
-    assert_eq!(parse_temperature(b"98.2"), 982);
-    assert_eq!(parse_temperature(b"-98.2"), -982);
+    assert_eq!(parse_temperature(b"0.0\nabc"), (0, 3));
+    assert_eq!(parse_temperature(b"9.2\nabc"), (92, 3));
+    assert_eq!(parse_temperature(b"-9.2\nabc"), (-92, 4));
+    assert_eq!(parse_temperature(b"98.2\nabc"), (982, 4));
+    assert_eq!(parse_temperature(b"-98.2\nabc"), (-982, 5));
 }
 
 #[cfg(unix)]
@@ -370,7 +373,7 @@ fn mmap(f: &File) -> &'_ [u8] {
 fn mmap(f: &File) -> &'_ [u8] {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Memory::{
-        CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
+        CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, PAGE_READONLY,
     };
 
     let len = f.metadata().unwrap().len();
