@@ -4,19 +4,16 @@
 #![feature(hasher_prefixfree_extras)]
 #![feature(ptr_cast_array)]
 
-use std::io::Write;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, HashMap, btree_map::Entry},
-    ffi::{c_int, c_void},
     fs::File,
     hash::{BuildHasher, Hash, Hasher},
-    os::fd::AsRawFd,
-    simd::{cmp::SimdPartialEq, u8x64},
+    io::{self, prelude::*},
+    path::Path,
+    simd::{Simd, cmp::SimdPartialEq},
+    sync::atomic::{AtomicU64, Ordering},
 };
-
-const SEMI: u8x64 = u8x64::splat(b';');
-const NEWL: u8x64 = u8x64::splat(b'\n');
 
 struct FastHasherBuilder;
 struct FastHasher(u64);
@@ -152,27 +149,17 @@ impl Default for Stat {
 }
 
 fn main() {
-    let f = File::open("measurements.txt").unwrap();
+    let file_name = "measurements.txt";
+    //let f = File::open("measurements.txt").unwrap();
     let mut stats = BTreeMap::new();
+    let next_chunk = AtomicU64::new(0);
     std::thread::scope(|scope| {
-        let map = mmap(&f);
         let nthreads = std::thread::available_parallelism().unwrap();
-        let mut at = 0;
         let (tx, rx) = std::sync::mpsc::sync_channel(nthreads.get());
-        let chunk_size = map.len() / nthreads;
         for _ in 0..nthreads.get() {
-            let start = at;
-            let end = (at + chunk_size).min(map.len());
-            let end = if end == map.len() {
-                map.len()
-            } else {
-                let newline_at = next_newline(&map[end..], 0);
-                end + newline_at + 1
-            };
-            let map = &map[start..end];
-            at = end;
             let tx = tx.clone();
-            scope.spawn(move || tx.send(one(map)));
+            let next_chunk = &next_chunk;
+            scope.spawn(move || tx.send(one(file_name, next_chunk)));
         }
 
         drop(tx);
@@ -228,20 +215,95 @@ fn print(stats: BTreeMap<String, Stat>) {
 }
 
 #[inline(never)]
-fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
+fn one(path: impl AsRef<Path>, next_chunk: &AtomicU64) -> HashMap<StrVec, Stat, FastHasherBuilder> {
     let mut stats = HashMap::with_capacity_and_hasher(1_024, FastHasherBuilder);
-    let mut at = 0;
-    while at < map.len() {
-        let newline_at = at + next_newline(map, at);
-        let line = unsafe { map.get_unchecked(at..newline_at) };
-        at = newline_at + 1;
-        let semi = semi_at(line);
-        let station = unsafe { line.get_unchecked(..semi) };
-        let temperature = unsafe { line.get_unchecked(semi + 1..) };
-        let t = parse_temperature(temperature);
-        update_stats(&mut stats, station, t);
+    let mut reader = ChunkReader::new(path).unwrap();
+
+    // claim next chunk for this worker
+    let get_next = || next_chunk.fetch_add(1, Ordering::Relaxed) as usize;
+
+    while let Some(chunk) = reader.read_chunk(get_next()).unwrap() {
+        let mut at = 0;
+        while at < chunk.len() {
+            let newline_at = at + unsafe { find_newline(&chunk[at..]).unwrap_unchecked() };
+            let line = unsafe { chunk.get_unchecked(at..newline_at) };
+            at = newline_at + 1;
+            let (station, temperature) = unsafe { split_at_semicolon(line) };
+            let t = parse_temperature(temperature);
+            update_stats(&mut stats, station, t);
+        }
     }
     stats
+}
+
+struct ChunkReader {
+    file: File,
+    file_len: u64,
+    num_chunks: usize,
+    buffer: Vec<u8>,
+}
+
+impl ChunkReader {
+    // empirically set on my machine, tuneable
+    const CHUNK_SIZE: usize = 1 << 16;
+    // must be at least maximum line length
+    const OVERLAP: usize = 106;
+
+    fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+        // you would think this would be a classic use case for all threads to share a file
+        // descriptor and use pread (via std::os::unix::fs::FileExt::read_exact_at), but it's
+        // faster to open a new file descriptor in each thread. I guess it's a contention issue
+        let file = File::open(path)?;
+        let file_len = file.metadata().unwrap().len();
+        Ok(Self {
+            file,
+            file_len,
+            num_chunks: file_len.div_ceil(Self::CHUNK_SIZE as u64) as usize,
+            buffer: vec![0; Self::CHUNK_SIZE + Self::OVERLAP],
+        })
+    }
+
+    /// Reads the `chunk_index`th chunk from self.file
+    fn read_chunk(&mut self, chunk_index: usize) -> io::Result<Option<&[u8]>> {
+        if chunk_index >= self.num_chunks {
+            return Ok(None);
+        }
+        let chunk_start = chunk_index as u64 * (Self::CHUNK_SIZE as u64);
+        let chunk_size = std::cmp::min(self.buffer.len(), (self.file_len - chunk_start) as usize);
+
+        self.file.seek(io::SeekFrom::Start(chunk_start))?;
+        self.file.read_exact(&mut self.buffer[..chunk_size])?;
+        Ok(Some(Self::trim_chunk(
+            &self.buffer,
+            chunk_index == 0,
+            chunk_size,
+        )))
+    }
+
+    // extracts chunk from self.buffer
+    // for chunks after the first one, we seek to the first newline
+    // for chunks besides the last one, we read forward after CHUNK_SIZE until
+    // we find a newline
+    // This contains plenty of branches but they're very predictable
+    fn trim_chunk(chunk: &[u8], is_first_chunk: bool, chunk_size: usize) -> &[u8] {
+        let start = if is_first_chunk {
+            std::hint::cold_path();
+            0
+        } else {
+            find_newline(chunk).unwrap() + 1
+        };
+
+        let end = if chunk_size < chunk.len() {
+            // this occurs when this is the last chunk and chunk size doesn't evenly divide file
+            // length
+            std::hint::cold_path();
+            chunk_size
+        } else {
+            find_newline(&chunk[Self::CHUNK_SIZE..]).unwrap() + Self::CHUNK_SIZE + 1
+        };
+
+        &chunk[start..end]
+    }
 }
 
 fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &[u8], t: i16) {
@@ -259,50 +321,36 @@ fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &
     stats.count += 1;
 }
 
-#[inline]
-fn next_newline(map: &[u8], at: usize) -> usize {
-    let rest = unsafe { map.get_unchecked(at..) };
-    let against = if let Some(restu8x64) = rest.first_chunk::<64>() {
-        u8x64::from_array(*restu8x64)
-    } else {
-        std::hint::cold_path();
-        u8x64::load_or_default(rest)
-    };
-    let newline_eq = NEWL.simd_eq(against);
-    if let Some(i) = newline_eq.first_set() {
-        i
-    } else {
-        // we know, line is at most 100+1+5 = 106b,
-        // but we can only search 64b, so the search _may_ have to fall back to memchr
-        // we know there _must_ be a newline, so rest[64..] must be non-empty
-        std::hint::cold_path();
-        let restrest = unsafe { rest.get_unchecked(64..) };
-        // SAFETY: restrest is valid for at least restrest.len() bytes
-        let next_newline = unsafe {
-            libc::memchr(
-                restrest.as_ptr() as *const c_void,
-                b'\n' as c_int,
-                restrest.len(),
-            )
-        };
-        assert!(!next_newline.is_null());
-        // SAFETY: memchr always returns pointers in restrest, which are valid
-        let len = unsafe { (next_newline as *const u8).offset_from(restrest.as_ptr()) } as usize;
-        64 + len
+// SAFETY: buffer must contain a semicolon in the last min(8, buffer.len()) bytes
+unsafe fn split_at_semicolon(buffer: &[u8]) -> (&[u8], &[u8]) {
+    let mut pos = buffer.len() - 4;
+    unsafe {
+        // SAFETY: readme promises there will be a semicolon
+        while *buffer.get_unchecked(pos) != b';' {
+            pos -= 1;
+        }
+        let (before, after) = buffer.split_at_unchecked(pos + 1);
+        (&before[..before.len() - 1], after)
     }
 }
 
-#[inline]
-fn semi_at(line: &[u8]) -> usize {
-    // we know, line is at most 100+1+5 = 106b
-    if line.len() > 64 {
-        std::hint::cold_path();
-        line.iter().position(|c| *c == b';').unwrap()
-    } else {
-        let delim_eq = SEMI.simd_eq(u8x64::load_or_default(line));
-        // SAFETY: we're promised there is a ; in every line
-        unsafe { delim_eq.first_set().unwrap_unchecked() }
+pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
+    const LANES: usize = 32;
+    const SPLAT: Simd<u8, LANES> = Simd::splat(b'\n');
+
+    let mut i = 0;
+    while let Some((chunk, rest)) = buffer.split_first_chunk() {
+        let bytes = Simd::<u8, LANES>::from_array(*chunk);
+        let index = bytes.simd_eq(SPLAT).first_set().map(|set| set + i);
+        if index.is_some() {
+            return index;
+        }
+        i += LANES;
+        buffer = rest;
     }
+
+    let bytes = Simd::<u8, LANES>::load_or_default(buffer);
+    bytes.simd_eq(SPLAT).first_set().map(|set| set + i)
 }
 
 #[inline]
@@ -327,27 +375,4 @@ fn pt() {
     assert_eq!(parse_temperature(b"-9.2"), -92);
     assert_eq!(parse_temperature(b"98.2"), 982);
     assert_eq!(parse_temperature(b"-98.2"), -982);
-}
-
-fn mmap(f: &File) -> &'_ [u8] {
-    let len = f.metadata().unwrap().len();
-    unsafe {
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            len as libc::size_t,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            f.as_raw_fd(),
-            0,
-        );
-
-        if ptr == libc::MAP_FAILED {
-            panic!("{:?}", std::io::Error::last_os_error());
-        } else {
-            if libc::madvise(ptr, len as libc::size_t, libc::MADV_SEQUENTIAL) != 0 {
-                panic!("{:?}", std::io::Error::last_os_error())
-            }
-            std::slice::from_raw_parts(ptr as *const u8, len as usize)
-        }
-    }
 }
