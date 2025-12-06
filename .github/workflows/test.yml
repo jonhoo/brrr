@@ -52,7 +52,7 @@ jobs:
         run: xz -d measurements-100m.txt.xz && mv measurements-100m.txt measurements.txt
       - name: Extract measurements on Windows
         if: runner.os == 'Windows'
-        run: 7zip e -d measurements-100m.txt.xz && mv measurements-100m.txt measurements.txt
+        run: 7z e measurements-100m.txt.xz && mv measurements-100m.txt measurements.txt
       - name: cargo run
         run: cargo run --locked --release > candidate.txt
       - name: diff candidate.txt correct-100m.txt
