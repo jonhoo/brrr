@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     name: ubuntu / nightly
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # tag=v5.0.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
       - name: Install nightly
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
         with:
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     name: 10% of 1brc
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # tag=v5.0.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
         with:
           lfs: true
       - name: Install nightly
@@ -61,7 +61,7 @@ jobs:
       #   if: runner.os == 'Windows'
       # - run: vcpkg install openssl:x64-windows-static-md
       #   if: runner.os == 'Windows'
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # tag=v5.0.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
       - name: Install nightly
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
         with:
