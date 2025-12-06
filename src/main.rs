@@ -7,11 +7,11 @@
 use std::io::Write;
 use std::{
     borrow::Borrow,
-    collections::{btree_map::Entry, BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, btree_map::Entry},
     fs::File,
     hash::{BuildHasher, Hash, Hasher},
     mem::ManuallyDrop,
-    simd::{cmp::SimdPartialEq, Simd},
+    simd::{Simd, cmp::SimdPartialEq},
 };
 
 #[cfg(unix)]
@@ -373,7 +373,7 @@ fn mmap(f: &File) -> &'_ [u8] {
 fn mmap(f: &File) -> &'_ [u8] {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Memory::{
-        CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, PAGE_READONLY,
+        CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
     };
 
     let len = f.metadata().unwrap().len();
