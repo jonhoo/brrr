@@ -56,4 +56,5 @@ jobs:
       - name: cargo run
         run: cargo run --locked --release > candidate.txt
       - name: diff candidate.txt correct-100m.txt
+        shell: bash
         run: diff candidate.txt correct-100m.txt
