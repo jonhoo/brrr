@@ -243,7 +243,7 @@ fn print(stats: BTreeMap<String, Stat>) {
     while let Some((station, stat)) = stats.next() {
         write!(
             writer,
-            "{station}={:.1}/{:.1}/{:.1}",
+            "{station}{:.1}/{:.1}/{:.1}",
             (stat.min as f64) / 10.,
             (stat.sum as f64) / 10. / (stat.count as f64),
             (stat.max as f64) / 10.
