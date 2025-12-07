@@ -318,19 +318,23 @@ pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
     bytes.simd_eq(SPLAT).first_set().map(|set| set + i)
 }
 
+use core::ops::Shr;
 #[inline]
 fn parse_temperature(t: &[u8]) -> i16 {
     let tlen = t.len();
     unsafe { std::hint::assert_unchecked(tlen >= 3) };
-    let is_neg = std::hint::select_unpredictable(t[0] == b'-', true, false);
-    let sign = i16::from(!is_neg) * 2 - 1;
+    // bit 5 is set for "-", but not for any of the numbers
+    let is_neg: u8 = (t[0].shr(4) ^ 1u8) & 1u8;
     let skip = usize::from(is_neg);
-    let has_dd = std::hint::select_unpredictable(tlen - skip == 4, true, false);
-    let mul = i16::from(has_dd) * 90 + 10;
-    let t1 = mul * i16::from(t[skip] - b'0');
-    let t2 = i16::from(has_dd) * 10 * i16::from(t[tlen - 3] - b'0');
-    let t3 = i16::from(t[tlen - 1] - b'0');
-    sign * (t1 + t2 + t3)
+    // (tlen - skip) is the number of digits and is either 3 or 4
+    let has_dd = (tlen - skip).shr(2) as i16 & 1i16;
+    let has_dd_mask = !(has_dd - 1i16);
+    let t1 = i16::from(t[skip] & 15) * 100 & has_dd_mask;
+    let t2 = i16::from(t[tlen - 3] & 15) * 10;
+    let t3 = i16::from(t[tlen - 1] & 15);
+
+    let value = t1 + t2 + t3;
+    (value ^ -(is_neg as i16)) + is_neg as i16
 }
 
 #[test]
