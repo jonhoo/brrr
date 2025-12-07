@@ -326,14 +326,17 @@ fn parse_temperature(t: &[u8]) -> i16 {
     // bit 5 is set for "-", but not for any of the numbers
     let is_neg: u8 = (t[0].shr(4) ^ 1u8) & 1u8;
     let skip = usize::from(is_neg);
-    // (tlen - skip) is the number of digits and is either 3 or 4
+    // (tlen - skip) is the number of digits (including decimal point) and is either 3 or 4.
     let has_dd = (tlen - skip).shr(2) as i16 & 1i16;
+    // replicate single bit across whole mask
     let has_dd_mask = !(has_dd - 1i16);
+    // calculate t1, but mask it out if no double digits
     let t1 = i16::from(t[skip] & 15) * 100 & has_dd_mask;
     let t2 = i16::from(t[tlen - 3] & 15) * 10;
     let t3 = i16::from(t[tlen - 1] & 15);
 
     let value = t1 + t2 + t3;
+    // negate value based on is_neg
     (value ^ -(is_neg as i16)) + is_neg as i16
 }
 
