@@ -286,16 +286,23 @@ fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &
     stats.count += 1;
 }
 
-// SAFETY: buffer must contain a semicolon in the last min(8, buffer.len()) bytes
+// SAFETY: semicolon is either found at buffer[buffer.len()-4] or buffer[buffer.len()-5]
+//         otherwise is assumed to be at buffer[buffer.len()-6]
 unsafe fn split_at_semicolon(buffer: &[u8]) -> (&[u8], &[u8]) {
     let mut pos = buffer.len() - 4;
     unsafe {
-        // SAFETY: readme promises there will be a semicolon
-        while *buffer.get_unchecked(pos) != b';' {
-            pos -= 1;
-        }
+        let mut total = 0;
+        let mut found = *buffer.get_unchecked(pos) == b';';
+        if !found {
+            total += 1
+        };
+        found |= *buffer.get_unchecked(pos - 1) == b';';
+        if !found {
+            total += 1
+        };
+        pos = pos - total;
         let (before, after) = buffer.split_at_unchecked(pos + 1);
-        (&before[..before.len() - 1], after)
+        (before.get_unchecked(..before.len() - 1), after)
     }
 }
 
