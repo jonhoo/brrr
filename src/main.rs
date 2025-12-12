@@ -227,31 +227,30 @@ fn main() {
     print(stats);
 }
 
+macro_rules! display_stat {
+    ($entry:expr) => {
+        format_args!(
+            "{}={:.1}/{:.1}/{:.1}",
+            $entry.0,
+            ($entry.1.min as f64) / 10.,
+            ($entry.1.sum as f64) / 10. / ($entry.1.count as f64),
+            ($entry.1.max as f64) / 10.
+        )
+    };
+}
+
 #[inline(never)]
 fn print(stats: BTreeMap<String, Stat>) {
     let stdout = std::io::stdout();
     let stdout = stdout.lock();
     let mut writer = std::io::BufWriter::new(stdout);
-    write!(writer, "{{").unwrap();
-    let stats = BTreeMap::from_iter(
-        stats
-            .iter()
-            // SAFETY: the README promised
-            .map(|(k, v)| (unsafe { std::str::from_utf8_unchecked(k.as_ref()) }, *v)),
-    );
-    let mut stats = stats.into_iter().peekable();
-    while let Some((station, stat)) = stats.next() {
-        write!(
-            writer,
-            "{station}={:.1}/{:.1}/{:.1}",
-            (stat.min as f64) / 10.,
-            (stat.sum as f64) / 10. / (stat.count as f64),
-            (stat.max as f64) / 10.
-        )
-        .unwrap();
-        if stats.peek().is_some() {
-            write!(writer, ", ").unwrap();
-        }
+    let mut stats = stats.into_iter();
+    let Some(first) = stats.next() else {
+        return write!(writer, "{{}}").unwrap();
+    };
+    write!(writer, "{{{}", display_stat!(first)).unwrap();
+    for entry in stats {
+        write!(writer, ", {}", display_stat!(entry)).unwrap();
     }
     write!(writer, "}}").unwrap();
 }
