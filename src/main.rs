@@ -5,6 +5,7 @@
 #![feature(ptr_cast_array)]
 
 use std::io::Write;
+use std::ops::Shr;
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, HashMap, btree_map::Entry},
@@ -189,6 +190,7 @@ fn main() {
         let mut at = 0;
         let (tx, rx) = std::sync::mpsc::sync_channel(nthreads.get());
         let chunk_size = map.len() / nthreads;
+
         for _ in 0..nthreads.get() {
             let start = at;
             let end = (at + chunk_size).min(map.len());
@@ -201,6 +203,7 @@ fn main() {
             let map = &map[start..end];
             at = end;
             let tx = tx.clone();
+
             scope.spawn(move || tx.send(one(map)));
         }
 
@@ -261,12 +264,16 @@ fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
     let mut stats = HashMap::with_capacity_and_hasher(1_024, FastHasherBuilder);
     let mut at = 0;
     while at < map.len() {
-        let newline_at = at + unsafe { find_newline(&map[at..]).unwrap_unchecked() };
-        let line = unsafe { map.get_unchecked(at..newline_at) };
+        let newline_at = at
+            + unsafe {
+                find_and_process_newline(&map[at..], |line| {
+                    let (station, temperature) = split_at_semicolon(line);
+                    let t = parse_temperature(temperature);
+                    update_stats(&mut stats, station, t);
+                })
+                .unwrap_unchecked()
+            };
         at = newline_at + 1;
-        let (station, temperature) = unsafe { split_at_semicolon(line) };
-        let t = parse_temperature(temperature);
-        update_stats(&mut stats, station, t);
     }
     stats
 }
@@ -316,6 +323,49 @@ pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
 
     let bytes = Simd::<u8, LANES>::load_or_default(buffer);
     bytes.simd_eq(SPLAT).first_set().map(|set| set + i)
+}
+
+pub fn find_and_process_newline(
+    mut buffer: &[u8],
+    mut line_fn: impl FnMut(&[u8]),
+) -> Option<usize> {
+    const LANES: usize = 64;
+    const SPLAT: Simd<u8, LANES> = Simd::splat(b'\n');
+
+    let mut i = 0;
+    while let Some((chunk, rest)) = buffer.split_first_chunk() {
+        let bytes = Simd::<u8, LANES>::from_array(*chunk);
+
+        let simd_masks = bytes.simd_eq(SPLAT);
+        let mut last_idx_after_newline = 0;
+
+        let mut bit_mask = simd_masks.to_bitmask();
+        loop {
+            let tz = bit_mask.trailing_zeros();
+            if tz == 64 {
+                break;
+            } else {
+                let idx = tz as usize;
+                let line_buf = &buffer[last_idx_after_newline..last_idx_after_newline + idx];
+                line_fn(line_buf);
+                last_idx_after_newline += idx + 1;
+                bit_mask = bit_mask.shr(idx + 1);
+            };
+        }
+
+        if last_idx_after_newline != 0 {
+            return Some(i + last_idx_after_newline - 1);
+        }
+
+        i += LANES;
+        buffer = rest;
+    }
+
+    let bytes = Simd::<u8, LANES>::load_or_default(buffer);
+    bytes.simd_eq(SPLAT).first_set().map(|set| {
+        line_fn(&buffer[..set]);
+        set + i
+    })
 }
 
 #[inline]
