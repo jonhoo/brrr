@@ -15,10 +15,10 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use unix::*;
 
 #[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
+use win::*;
 
 const HASH_K: u64 = 0xf1357aea2e62a9c5;
 const HASH_SEED: u64 = 0x13198a2e03707344;
@@ -184,7 +184,8 @@ fn main() {
     let f = File::open("measurements.txt").unwrap();
     let mut stats = BTreeMap::new();
     std::thread::scope(|scope| {
-        let map = mmap(&f);
+        let map = Mmap::new(&f);
+        let map = map.bytes;
         let nthreads = std::thread::available_parallelism().unwrap();
         let mut at = 0;
         let (tx, rx) = std::sync::mpsc::sync_channel(nthreads.get());
@@ -343,59 +344,99 @@ fn pt() {
 }
 
 #[cfg(unix)]
-fn mmap(f: &File) -> &'_ [u8] {
-    let len = f.metadata().unwrap().len();
-    unsafe {
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            len as libc::size_t,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE,
-            f.as_raw_fd(),
-            0,
-        );
+mod unix {
+    use super::File;
+    use std::os::fd::AsRawFd;
 
-        if ptr == libc::MAP_FAILED {
-            panic!("{:?}", std::io::Error::last_os_error());
-        } else {
-            if libc::madvise(ptr, len as libc::size_t, libc::MADV_SEQUENTIAL) != 0 {
-                panic!("{:?}", std::io::Error::last_os_error())
+    pub(crate) struct Mmap<'a> {
+        pub(crate) bytes: &'a [u8],
+    }
+
+    impl<'a> Mmap<'a> {
+        pub(crate) fn new(f: &'a File) -> Self {
+            let len = f.metadata().unwrap().len();
+            unsafe {
+                let ptr = libc::mmap(
+                    std::ptr::null_mut(),
+                    len as libc::size_t,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE,
+                    f.as_raw_fd(),
+                    0,
+                );
+
+                if ptr == libc::MAP_FAILED {
+                    panic!("{:?}", std::io::Error::last_os_error());
+                } else {
+                    if libc::madvise(ptr, len as libc::size_t, libc::MADV_SEQUENTIAL) != 0 {
+                        panic!("{:?}", std::io::Error::last_os_error())
+                    }
+                    Mmap {
+                        bytes: std::slice::from_raw_parts(ptr as *const u8, len as usize),
+                    }
+                }
             }
-            std::slice::from_raw_parts(ptr as *const u8, len as usize)
         }
     }
 }
 
 #[cfg(windows)]
-fn mmap(f: &File) -> &'_ [u8] {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Memory::{
-        CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
+mod win {
+    use super::File;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::Memory::{
+            CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+            PAGE_READONLY, UnmapViewOfFile,
+        },
     };
 
-    let len = f.metadata().unwrap().len();
-    unsafe {
-        let hfile = f.as_raw_handle();
+    pub(crate) struct Mmap<'a> {
+        mapping: HANDLE,
+        view: MEMORY_MAPPED_VIEW_ADDRESS,
+        pub(crate) bytes: &'a [u8],
+    }
 
-        let hmap = CreateFileMappingW(
-            hfile,
-            std::ptr::null_mut(),
-            PAGE_READONLY,
-            0,
-            0,
-            std::ptr::null(),
-        );
-
-        if hmap.is_null() {
-            panic!("{:?}", std::io::Error::last_os_error());
+    impl Drop for Mmap<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                UnmapViewOfFile(self.view);
+                CloseHandle(self.mapping);
+            }
         }
+    }
 
-        let view = MapViewOfFile(hmap, FILE_MAP_READ, 0, 0, 0);
-        if view.Value.is_null() {
-            CloseHandle(hmap);
-            panic!("{:?}", std::io::Error::last_os_error());
+    impl<'a> Mmap<'a> {
+        pub(crate) fn new(f: &'a File) -> Self {
+            let len = f.metadata().unwrap().len();
+            unsafe {
+                let mapping = CreateFileMappingW(
+                    f.as_raw_handle(),
+                    std::ptr::null_mut(),
+                    PAGE_READONLY,
+                    0,
+                    0,
+                    std::ptr::null(),
+                );
+
+                if mapping.is_null() {
+                    panic!("{:?}", std::io::Error::last_os_error());
+                }
+
+                let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+
+                if view.Value.is_null() {
+                    CloseHandle(mapping);
+                    panic!("{:?}", std::io::Error::last_os_error());
+                }
+
+                Mmap {
+                    mapping,
+                    view,
+                    bytes: std::slice::from_raw_parts(view.Value as *const u8, len as usize),
+                }
+            }
         }
-
-        std::slice::from_raw_parts(view.Value as *const u8, len as usize)
     }
 }
