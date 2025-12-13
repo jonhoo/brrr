@@ -273,7 +273,6 @@ fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
                 })
                 .unwrap_unchecked()
             };
-        assert!(newline_at + 1 > at);
         at = newline_at + 1;
     }
     stats
