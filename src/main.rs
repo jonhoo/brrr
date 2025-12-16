@@ -291,16 +291,10 @@ fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &
 unsafe fn split_at_semicolon(buffer: &[u8]) -> (&[u8], &[u8]) {
     let mut pos = buffer.len() - 4;
     unsafe {
-        let mut total = 0;
-        let mut found = *buffer.get_unchecked(pos) == b';';
-        if !found {
-            total += 1
-        };
-        found |= *buffer.get_unchecked(pos - 1) == b';';
-        if !found {
-            total += 1
-        };
-        pos = pos - total;
+        let not_found1 = (*buffer.get_unchecked(pos) != b';') as usize;
+        let not_found2 = (*buffer.get_unchecked(pos - 1) != b';') as usize;
+        pos = pos - (not_found1 + (not_found1 & not_found2));
+
         let (before, after) = buffer.split_at_unchecked(pos + 1);
         (before.get_unchecked(..before.len() - 1), after)
     }
