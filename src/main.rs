@@ -288,12 +288,17 @@ fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &
 
 // SAFETY: buffer must contain a semicolon in the last min(8, buffer.len()) bytes
 unsafe fn split_at_semicolon(buffer: &[u8]) -> (&[u8], &[u8]) {
-    let mut pos = buffer.len() - 4;
+    const SPLAT: Simd<u8, LANES> = Simd::splat(b';');
+    const LANES: usize = 4;
+
     unsafe {
-        // SAFETY: readme promises there will be a semicolon
-        while *buffer.get_unchecked(pos) != b';' {
-            pos -= 1;
-        }
+        let start = buffer.len() - 7;
+        let end = buffer.len() - 4;
+        let bytes = Simd::<u8, LANES>::from_slice(&buffer[start..=end]);
+
+        // SAFETY: Readme promises there will be a semicolon
+        let pos = start + bytes.simd_eq(SPLAT).first_set().unwrap_unchecked();
+
         let (before, after) = buffer.split_at_unchecked(pos + 1);
         (&before[..before.len() - 1], after)
     }
@@ -314,8 +319,7 @@ pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
         buffer = rest;
     }
 
-    let bytes = Simd::<u8, LANES>::load_or_default(buffer);
-    bytes.simd_eq(SPLAT).first_set().map(|set| set + i)
+    buffer.iter().position(|&b| b == b'\n').map(|pos| pos + i)
 }
 
 #[inline]
