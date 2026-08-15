@@ -233,12 +233,6 @@ fn print(stats: BTreeMap<String, Stat>) {
     let stdout = stdout.lock();
     let mut writer = std::io::BufWriter::new(stdout);
     write!(writer, "{{").unwrap();
-    let stats = BTreeMap::from_iter(
-        stats
-            .iter()
-            // SAFETY: the README promised
-            .map(|(k, v)| (unsafe { std::str::from_utf8_unchecked(k.as_ref()) }, *v)),
-    );
     let mut stats = stats.into_iter().peekable();
     while let Some((station, stat)) = stats.next() {
         write!(
