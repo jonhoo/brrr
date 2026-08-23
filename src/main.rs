@@ -264,8 +264,7 @@ fn one(map: &[u8]) -> HashMap<StrVec, Stat, FastHasherBuilder> {
         let newline_at = at + unsafe { find_newline(&map[at..]).unwrap_unchecked() };
         let line = unsafe { map.get_unchecked(at..newline_at) };
         at = newline_at + 1;
-        let (station, temperature) = unsafe { split_at_semicolon(line) };
-        let t = parse_temperature(temperature);
+        let (t, station) = parse_line(line);
         update_stats(&mut stats, station, t);
     }
     stats
@@ -284,19 +283,6 @@ fn update_stats(stats: &mut HashMap<StrVec, Stat, FastHasherBuilder>, station: &
     }
     stats.sum += i64::from(t);
     stats.count += 1;
-}
-
-// SAFETY: buffer must contain a semicolon in the last min(8, buffer.len()) bytes
-unsafe fn split_at_semicolon(buffer: &[u8]) -> (&[u8], &[u8]) {
-    let mut pos = buffer.len() - 4;
-    unsafe {
-        // SAFETY: readme promises there will be a semicolon
-        while *buffer.get_unchecked(pos) != b';' {
-            pos -= 1;
-        }
-        let (before, after) = buffer.split_at_unchecked(pos + 1);
-        (&before[..before.len() - 1], after)
-    }
 }
 
 pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
@@ -319,27 +305,51 @@ pub fn find_newline(mut buffer: &[u8]) -> Option<usize> {
 }
 
 #[inline]
-fn parse_temperature(t: &[u8]) -> i16 {
-    let tlen = t.len();
-    unsafe { std::hint::assert_unchecked(tlen >= 3) };
-    let is_neg = std::hint::select_unpredictable(t[0] == b'-', true, false);
-    let sign = i16::from(!is_neg) * 2 - 1;
-    let skip = usize::from(is_neg);
-    let has_dd = std::hint::select_unpredictable(tlen - skip == 4, true, false);
-    let mul = i16::from(has_dd) * 90 + 10;
-    let t1 = mul * i16::from(t[skip] - b'0');
-    let t2 = i16::from(has_dd) * 10 * i16::from(t[tlen - 3] - b'0');
-    let t3 = i16::from(t[tlen - 1] - b'0');
-    sign * (t1 + t2 + t3)
+fn parse_line(line: &[u8]) -> (i16, &[u8]) {
+    // parse temperature backwards, avoiding search for semicolon
+    let mut index = line.len() - 1;
+    // The first digit after the decimal point (10^-1)
+    let mut temperature = unsafe { *line.get_unchecked(index) - b'0' } as i16;
+    // skip over the dot (.)
+    index = unsafe { index.unchecked_sub(2) };
+
+    // The digit before the dot (10^0)
+    temperature += (unsafe { *line.get_unchecked(index) - b'0' } as i16) * 10;
+
+    index = unsafe { index.unchecked_sub(1) };
+    match *unsafe { line.get_unchecked(index) } {
+        // No minus sign and the number is < 10
+        b';' => (),
+        // Minus sign but the number is > -10
+        b'-' => {
+            temperature = -temperature;
+            index = unsafe { index.unchecked_sub(1) };
+        }
+        // The number is > 10 (so far)
+        digit => {
+            temperature += ((digit - b'0') as i16) * 100;
+            index = unsafe { index.unchecked_sub(1) };
+        }
+    }
+    // This character can only be either ';' or '-'
+    if unsafe { *line.get_unchecked(index) } == b'-' {
+        // The number is negative and <= -10
+        temperature = -temperature;
+        index = unsafe { index.unchecked_sub(1) };
+    }
+    // `index` now points at the semicolon
+    let station = unsafe { line.get_unchecked(..index) };
+    (temperature, station)
 }
 
 #[test]
 fn pt() {
-    assert_eq!(parse_temperature(b"0.0"), 0);
-    assert_eq!(parse_temperature(b"9.2"), 92);
-    assert_eq!(parse_temperature(b"-9.2"), -92);
-    assert_eq!(parse_temperature(b"98.2"), 982);
-    assert_eq!(parse_temperature(b"-98.2"), -982);
+    // parse_line returns the temperature and station.
+    assert_eq!(parse_line(b"Seattle;0.0"), (0, "Seattle".as_bytes()));
+    assert_eq!(parse_line(b"Phoenix;9.2"), (92, "Phoenix".as_bytes()));
+    assert_eq!(parse_line(b"Bergen;-9.2"), (-92, "Bergen".as_bytes()));
+    assert_eq!(parse_line(b"Athens;98.2"), (982, "Athens".as_bytes()));
+    assert_eq!(parse_line(b"Tampere;-98.2"), (-982, "Tampere".as_bytes()));
 }
 
 #[cfg(unix)]
